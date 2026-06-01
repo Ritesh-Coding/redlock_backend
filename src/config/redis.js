@@ -48,4 +48,43 @@ redlock.on('clientError', (err) => {
   console.error('[Redlock Client Error]:', err);
 });
 
-export { redisClient, redlock };
+// Atomic Token Bucket Lua Script for Distributed Rate Limiting
+const RATE_LIMIT_LUA = `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2]) -- tokens per millisecond
+local now = tonumber(ARGV[3]) -- current time in ms
+local requested = tonumber(ARGV[4] or 1)
+
+-- Retrieve bucket details
+local data = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(data[1])
+local last_refill = tonumber(data[2])
+
+if not tokens then
+    tokens = capacity
+    last_refill = now
+else
+    -- Refill tokens based on time elapsed
+    local elapsed = now - last_refill
+    local refilled = elapsed * refill_rate
+    tokens = math.min(capacity, tokens + refilled)
+    last_refill = now
+end
+
+-- Deduct token if allowed
+local allowed = false
+if tokens >= requested then
+    tokens = tokens - requested
+    allowed = true
+end
+
+-- Save bucket state with 1-hour expiration
+redis.call('HSET', key, 'tokens', tokens, 'last_refill', last_refill)
+redis.call('EXPIRE', key, 3600)
+
+return { allowed and 1 or 0, tokens }
+`;
+
+export { redisClient, redlock, RATE_LIMIT_LUA };
+
